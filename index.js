@@ -5,6 +5,7 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./db'); // SQLite (better-sqlite3) DB connection
+const geoip = require('geoip-lite');
 
 const app = express();
 app.use(express.json());
@@ -22,16 +23,114 @@ app.use((req, res, next) => {
   next();
 });
 
-// ----- Pre-lead (fbc/fbp) DB statements -----
+// ----- Helper functions for tracking -----
+// Client IP detect (x-forwarded-for etc.)
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    return String(xff).split(',')[0].trim();
+  }
+  if (req.socket && req.socket.remoteAddress) {
+    return req.socket.remoteAddress;
+  }
+  return null;
+}
+
+// Cloudflare / App Engine headers se country detect
+function getCountryFromHeaders(req) {
+  const cfCountry = req.headers['cf-ipcountry'];
+  if (cfCountry && cfCountry !== 'XX') return String(cfCountry).toUpperCase();
+
+  const gaeCountry = req.headers['x-appengine-country'];
+  if (gaeCountry && gaeCountry !== 'ZZ') return String(gaeCountry).toUpperCase();
+
+  // Fallback to geoip-lite using IP
+  const ip = getClientIp(req);
+  if (!ip) return null;
+
+  const geo = geoip.lookup(ip);
+  if (geo && geo.country) {
+    return geo.country.toUpperCase();
+  }
+
+  return null;
+}
+
+
+// Simple user-agent parser (approx, but kaam ka)
+function parseUserAgent(uaRaw) {
+  const ua = (uaRaw || '').toLowerCase();
+
+  let deviceType = 'unknown';
+  if (ua.includes('mobile') || ua.includes('android') || ua.includes('iphone')) {
+    deviceType = 'mobile';
+  } else if (ua.includes('ipad') || ua.includes('tablet')) {
+    deviceType = 'tablet';
+  } else if (ua) {
+    deviceType = 'desktop';
+  }
+
+  let browser = 'unknown';
+  if (ua.includes('edg/')) browser = 'Edge';
+  else if (ua.includes('chrome/')) browser = 'Chrome';
+  else if (ua.includes('safari/') && !ua.includes('chrome/')) browser = 'Safari';
+  else if (ua.includes('firefox/')) browser = 'Firefox';
+  else if (ua.includes('opr/') || ua.includes('opera')) browser = 'Opera';
+
+  let os = 'unknown';
+  if (ua.includes('android')) os = 'Android';
+  else if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ios')) os = 'iOS';
+  else if (ua.includes('windows')) os = 'Windows';
+  else if (ua.includes('mac os') || ua.includes('macintosh')) os = 'macOS';
+  else if (ua.includes('linux')) os = 'Linux';
+
+  return { deviceType, browser, os };
+}
+
+// ----- Pre-lead (fbc/fbp + tracking) DB statements -----
 // LP se aane wale JOIN click ko store karne ke liye
 const insertPreLeadStmt = db.prepare(`
-  INSERT INTO pre_leads (channel_id, fbc, fbp, created_at, used)
-  VALUES (?, ?, ?, ?, 0)
+  INSERT INTO pre_leads (
+    channel_id,
+    fbc,
+    fbp,
+    ip,
+    country,
+    user_agent,
+    device_type,
+    browser,
+    os,
+    source,
+    utm_source,
+    utm_medium,
+    utm_campaign,
+    utm_content,
+    utm_term,
+    created_at,
+    used
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
 `);
 
 // join accept time par recent pre_lead nikalne ke liye
 const getRecentPreLeadStmt = db.prepare(`
-  SELECT id, fbc, fbp, created_at
+  SELECT
+    id,
+    fbc,
+    fbp,
+    ip,
+    country,
+    user_agent,
+    device_type,
+    browser,
+    os,
+    source,
+    utm_source,
+    utm_medium,
+    utm_campaign,
+    utm_content,
+    utm_term,
+    created_at
   FROM pre_leads
   WHERE channel_id = ?
     AND used = 0
@@ -76,6 +175,11 @@ function formatDateYYYYMMDD(timestamp) {
   return `${year}-${month}-${day}`;
 }
 
+// Random event_id for Meta dedup
+function generateEventId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
 // ----- Basic health route -----
 app.get('/', (req, res) => {
   res.send('Telegram Funnel Bot running ✅');
@@ -107,13 +211,29 @@ app.get('/debug-channels', (req, res) => {
   }
 });
 
-// ----- LP se pre-lead capture (fbc/fbp store) -----
+// ----- LP se pre-lead capture (fbc/fbp + tracking store) -----
 // Landing page se call hoga:
 // POST /pre-lead
-// body: { channel_id: '<telegram_chat_id as string>', fbc: 'fb.1.xxx', fbp: 'fb.1.xxx' }
+// body: {
+//   channel_id: '<telegram_chat_id as string>',
+//   fbc: 'fb.1.xxx',
+//   fbp: 'fb.1.xxx',
+//   source: 'Meta' | 'Instagram' | 'Facebook' | 'Other',
+//   utm_source, utm_medium, utm_campaign, utm_content, utm_term
+// }
 app.post('/pre-lead', (req, res) => {
   try {
-    const { channel_id, fbc, fbp } = req.body || {};
+    const {
+      channel_id,
+      fbc,
+      fbp,
+      source,
+      utm_source,
+      utm_medium,
+      utm_campaign,
+      utm_content,
+      utm_term,
+    } = req.body || {};
 
     if (!channel_id) {
       return res
@@ -123,10 +243,27 @@ app.post('/pre-lead', (req, res) => {
 
     const now = Math.floor(Date.now() / 1000);
 
+    const ip = getClientIp(req);
+    const country = getCountryFromHeaders(req);
+    const userAgent = req.headers['user-agent'] || null;
+    const { deviceType, browser, os } = parseUserAgent(userAgent);
+
     insertPreLeadStmt.run(
       String(channel_id),
       fbc || null,
       fbp || null,
+      ip || null,
+      country || null,
+      userAgent || null,
+      deviceType || null,
+      browser || null,
+      os || null,
+      source || null,
+      utm_source || null,
+      utm_medium || null,
+      utm_campaign || null,
+      utm_content || null,
+      utm_term || null,
       now
     );
 
@@ -249,11 +386,38 @@ async function sendMetaLeadEvent(user, joinRequest) {
   let fbcForThisLead = null;
   let fbpForThisLead = null;
 
+  let ipForThisLead = null;
+  let countryForThisLead = null;
+  let uaForThisLead = null;
+  let deviceTypeForThisLead = null;
+  let browserForThisLead = null;
+  let osForThisLead = null;
+  let sourceForThisLead = null;
+  let utmSourceForThisLead = null;
+  let utmMediumForThisLead = null;
+  let utmCampaignForThisLead = null;
+  let utmContentForThisLead = null;
+  let utmTermForThisLead = null;
+
   try {
     const row = getRecentPreLeadStmt.get(channelId, thirtyMinutesAgo);
     if (row) {
       if (row.fbc) fbcForThisLead = row.fbc;
       if (row.fbp) fbpForThisLead = row.fbp;
+
+      ipForThisLead = row.ip || null;
+      countryForThisLead = row.country || null;
+      uaForThisLead = row.user_agent || null;
+      deviceTypeForThisLead = row.device_type || null;
+      browserForThisLead = row.browser || null;
+      osForThisLead = row.os || null;
+      sourceForThisLead = row.source || null;
+      utmSourceForThisLead = row.utm_source || null;
+      utmMediumForThisLead = row.utm_medium || null;
+      utmCampaignForThisLead = row.utm_campaign || null;
+      utmContentForThisLead = row.utm_content || null;
+      utmTermForThisLead = row.utm_term || null;
+
       // is pre_lead ko dobara use na ho isliye used mark karo
       markPreLeadUsedStmt.run(row.id);
     }
@@ -267,6 +431,20 @@ async function sendMetaLeadEvent(user, joinRequest) {
 
   // ⭐ Debug log to see which fbc/fbp were used
   console.log('Using fbcForThisLead:', fbcForThisLead, 'fbpForThisLead:', fbpForThisLead);
+  console.log('Tracking for lead:', {
+    ipForThisLead,
+    countryForThisLead,
+    uaForThisLead,
+    deviceTypeForThisLead,
+    browserForThisLead,
+    osForThisLead,
+    sourceForThisLead,
+    utmSourceForThisLead,
+    utmMediumForThisLead,
+    utmCampaignForThisLead,
+    utmContentForThisLead,
+    utmTermForThisLead,
+  });
 
   // Channel config (pixel, LP, client)
   const channelConfig = getOrCreateChannelConfigFromJoin(
@@ -280,19 +458,35 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const url = `https://graph.facebook.com/v18.0/${pixelId}/events?access_token=${META_ACCESS_TOKEN}`;
 
   const externalIdHash = hashSha256(String(user.id));
+  const eventId = generateEventId();
+
+  const userData = {
+    external_id: externalIdHash,
+    ...(fbcForThisLead ? { fbc: fbcForThisLead } : {}),
+    ...(fbpForThisLead ? { fbp: fbpForThisLead } : {}),
+    ...(ipForThisLead ? { client_ip_address: ipForThisLead, ip_address: ipForThisLead } : {}),
+    ...(uaForThisLead ? { client_user_agent: uaForThisLead } : {}),
+  };
+
+  const customData = {
+    ...(sourceForThisLead ? { source: sourceForThisLead } : {}),
+    ...(utmSourceForThisLead ? { utm_source: utmSourceForThisLead } : {}),
+    ...(utmMediumForThisLead ? { utm_medium: utmMediumForThisLead } : {}),
+    ...(utmCampaignForThisLead ? { utm_campaign: utmCampaignForThisLead } : {}),
+    ...(utmContentForThisLead ? { utm_content: utmContentForThisLead } : {}),
+    ...(utmTermForThisLead ? { utm_term: utmTermForThisLead } : {}),
+  };
 
   const payload = {
     data: [
       {
         event_name: 'Lead',
         event_time: eventTime,
+        event_id: eventId,
         event_source_url: lpUrl,
-        action_source: 'system_generated',
-        user_data: {
-          external_id: externalIdHash,
-          ...(fbcForThisLead ? { fbc: fbcForThisLead } : {}),
-          ...(fbpForThisLead ? { fbp: fbpForThisLead } : {}),
-        },
+        action_source: 'website',
+        user_data: userData,
+        ...(Object.keys(customData).length ? { custom_data: customData } : {}),
       },
     ],
   };
@@ -304,8 +498,27 @@ async function sendMetaLeadEvent(user, joinRequest) {
   db.prepare(
     `
     INSERT INTO joins 
-      (telegram_user_id, telegram_username, channel_id, channel_title, joined_at, meta_event_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+      (
+        telegram_user_id,
+        telegram_username,
+        channel_id,
+        channel_title,
+        joined_at,
+        meta_event_id,
+        ip,
+        country,
+        user_agent,
+        device_type,
+        browser,
+        os,
+        source,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_content,
+        utm_term
+      )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
   ).run(
     String(user.id),
@@ -313,7 +526,19 @@ async function sendMetaLeadEvent(user, joinRequest) {
     String(joinRequest.chat.id),
     joinRequest.chat.title || null,
     eventTime,
-    null // meta_event_id future ke liye
+    eventId,
+    ipForThisLead || null,
+    countryForThisLead || null,
+    uaForThisLead || null,
+    deviceTypeForThisLead || null,
+    browserForThisLead || null,
+    osForThisLead || null,
+    sourceForThisLead || null,
+    utmSourceForThisLead || null,
+    utmMediumForThisLead || null,
+    utmCampaignForThisLead || null,
+    utmContentForThisLead || null,
+    utmTermForThisLead || null
   );
 
   console.log('✅ Join stored in DB for user:', user.id);
@@ -440,12 +665,40 @@ app.get('/api/stats', (req, res) => {
       )
       .all();
 
+    // Recent joins with tracking (for UI)
+    const recentJoins = db
+      .prepare(
+        `
+        SELECT
+          telegram_username,
+          channel_title,
+          channel_id,
+          joined_at,
+          ip,
+          country,
+          device_type,
+          browser,
+          os,
+          source,
+          utm_source,
+          utm_medium,
+          utm_campaign,
+          utm_content,
+          utm_term
+        FROM joins
+        ORDER BY joined_at DESC
+        LIMIT 50
+      `
+      )
+      .all();
+
     res.json({
       ok: true,
       total_joins: totalJoins,
       today_joins: todayJoins,
       last_7_days: last7Days,
       by_channel: channels,
+      recent_joins: recentJoins,
     });
   } catch (err) {
     console.error('❌ Error in /api/stats:', err);
@@ -502,6 +755,32 @@ app.get('/dashboard', (req, res) => {
       )
       .all();
 
+    const recentJoins = db
+      .prepare(
+        `
+        SELECT
+          telegram_username,
+          channel_title,
+          channel_id,
+          joined_at,
+          ip,
+          country,
+          device_type,
+          browser,
+          os,
+          source,
+          utm_source,
+          utm_medium,
+          utm_campaign,
+          utm_content,
+          utm_term
+        FROM joins
+        ORDER BY joined_at DESC
+        LIMIT 50
+      `
+      )
+      .all();
+
     // Simple HTML UI
     res.send(`
       <!DOCTYPE html>
@@ -518,7 +797,7 @@ app.get('/dashboard', (req, res) => {
             padding: 24px;
           }
           .container {
-            max-width: 900px;
+            max-width: 1100px;
             margin: 0 auto;
           }
           h1 {
@@ -555,11 +834,15 @@ app.get('/dashboard', (req, res) => {
           th, td {
             padding: 8px 10px;
             border-bottom: 1px solid #1f2937;
-            font-size: 13px;
+            font-size: 12px;
           }
           th {
             text-align: left;
             color: #9ca3af;
+            white-space: nowrap;
+          }
+          td {
+            white-space: nowrap;
           }
           tr:hover {
             background: #111827;
@@ -571,6 +854,15 @@ app.get('/dashboard', (req, res) => {
           .muted {
             color: #6b7280;
             font-size: 12px;
+          }
+          .nowrap {
+            white-space: nowrap;
+          }
+          @media (max-width: 900px) {
+            table {
+              display: block;
+              overflow-x: auto;
+            }
           }
           @media (max-width: 600px) {
             .cards {
@@ -650,8 +942,60 @@ app.get('/dashboard', (req, res) => {
             </table>
           </div>
 
+          <div>
+            <div class="section-title">Recent Joins (Tracking Details)</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Username</th>
+                  <th>Channel</th>
+                  <th>IP</th>
+                  <th>Country</th>
+                  <th>Device</th>
+                  <th>Browser</th>
+                  <th>OS</th>
+                  <th>Source</th>
+                  <th>UTM Source</th>
+                  <th>UTM Medium</th>
+                  <th>UTM Campaign</th>
+                  <th>UTM Content</th>
+                  <th>UTM Term</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  recentJoins.length === 0
+                    ? `<tr><td colspan="14" class="muted">No joins yet</td></tr>`
+                    : recentJoins
+                        .map((j) => {
+                          const dt = new Date(j.joined_at * 1000).toISOString().replace('T',' ').substring(0,19);
+                          return `
+                  <tr>
+                    <td class="nowrap">${dt}</td>
+                    <td>${j.telegram_username || '(no username)'}</td>
+                    <td>${j.channel_title || ''}</td>
+                    <td>${j.ip || ''}</td>
+                    <td>${j.country || ''}</td>
+                    <td>${j.device_type || ''}</td>
+                    <td>${j.browser || ''}</td>
+                    <td>${j.os || ''}</td>
+                    <td>${j.source || ''}</td>
+                    <td>${j.utm_source || ''}</td>
+                    <td>${j.utm_medium || ''}</td>
+                    <td>${j.utm_campaign || ''}</td>
+                    <td>${j.utm_content || ''}</td>
+                    <td>${j.utm_term || ''}</td>
+                  </tr>`;
+                        })
+                        .join('')
+                }
+              </tbody>
+            </table>
+          </div>
+
           <div class="muted">
-            Simple v1 dashboard – future: add client login, filters, date range, etc.
+            Simple v2 dashboard – tracking with IP, device, browser, OS, source & UTM.
           </div>
         </div>
       </body>

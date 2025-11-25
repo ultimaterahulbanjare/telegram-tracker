@@ -30,6 +30,7 @@ db.exec(`
 `);
 
 // --- Table: joins log ---
+// NOTE: purane DB me ye columns na bhi ho sakte hain, neeche migration se add ho jayenge
 db.exec(`
   CREATE TABLE IF NOT EXISTS joins (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +39,19 @@ db.exec(`
     channel_id TEXT,
     channel_title TEXT,
     joined_at INTEGER,
-    meta_event_id TEXT
+    meta_event_id TEXT,
+    ip TEXT,
+    country TEXT,
+    user_agent TEXT,
+    device_type TEXT,
+    browser TEXT,
+    os TEXT,
+    source TEXT,
+    utm_source TEXT,
+    utm_medium TEXT,
+    utm_campaign TEXT,
+    utm_content TEXT,
+    utm_term TEXT
   );
 `);
 
@@ -49,22 +62,73 @@ db.exec(`
     channel_id TEXT NOT NULL,
     fbc TEXT,
     fbp TEXT,
+    ip TEXT,
+    country TEXT,
+    user_agent TEXT,
+    device_type TEXT,
+    browser TEXT,
+    os TEXT,
+    source TEXT,
+    utm_source TEXT,
+    utm_medium TEXT,
+    utm_campaign TEXT,
+    utm_content TEXT,
+    utm_term TEXT,
     created_at INTEGER NOT NULL,
     used INTEGER NOT NULL DEFAULT 0
   );
 `);
 
-// 🔹 Safe migration: agar purani pre_leads table me fbp column nahi hai to add karo
-try {
-  const cols = db.prepare("PRAGMA table_info(pre_leads)").all();
-  const hasFbp = cols.some(c => c.name === 'fbp');
-  if (!hasFbp) {
-    db.exec(`ALTER TABLE pre_leads ADD COLUMN fbp TEXT;`);
-    console.log("✅ Added fbp column to pre_leads");
+// 🔹 Safe migration helpers
+function ensureColumns(tableName, columns) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
+    const existing = new Set(cols.map(c => c.name));
+
+    for (const col of columns) {
+      if (!existing.has(col.name)) {
+        const sql = `ALTER TABLE ${tableName} ADD COLUMN ${col.name} ${col.type};`;
+        db.exec(sql);
+        console.log(`✅ Added column ${col.name} to ${tableName}`);
+      }
+    }
+  } catch (e) {
+    console.log(`ℹ️ ${tableName} migration check error:`, e.message);
   }
-} catch (e) {
-  console.log("ℹ️ pre_leads fbp migration check error:", e.message);
 }
+
+// 🔹 pre_leads ke liye ensure karo ke sab nayi tracking columns ho
+ensureColumns('pre_leads', [
+  { name: 'fbp', type: 'TEXT' },        // agar purane version me missing ho
+  { name: 'ip', type: 'TEXT' },
+  { name: 'country', type: 'TEXT' },
+  { name: 'user_agent', type: 'TEXT' },
+  { name: 'device_type', type: 'TEXT' },
+  { name: 'browser', type: 'TEXT' },
+  { name: 'os', type: 'TEXT' },
+  { name: 'source', type: 'TEXT' },
+  { name: 'utm_source', type: 'TEXT' },
+  { name: 'utm_medium', type: 'TEXT' },
+  { name: 'utm_campaign', type: 'TEXT' },
+  { name: 'utm_content', type: 'TEXT' },
+  { name: 'utm_term', type: 'TEXT' }
+]);
+
+// 🔹 joins ke liye bhi ensure karo ke sab nayi tracking columns ho
+ensureColumns('joins', [
+  { name: 'ip', type: 'TEXT' },
+  { name: 'country', type: 'TEXT' },
+  { name: 'user_agent', type: 'TEXT' },
+  { name: 'device_type', type: 'TEXT' },
+  { name: 'browser', type: 'TEXT' },
+  { name: 'os', type: 'TEXT' },
+  { name: 'source', type: 'TEXT' },
+  { name: 'utm_source', type: 'TEXT' },
+  { name: 'utm_medium', type: 'TEXT' },
+  { name: 'utm_campaign', type: 'TEXT' },
+  { name: 'utm_content', type: 'TEXT' },
+  { name: 'utm_term', type: 'TEXT' }
+]);
 
 // --- Ensure ek default client row ho always (id=1) ---
 const defaultClient = db.prepare(`SELECT id FROM clients WHERE id = 1`).get();
