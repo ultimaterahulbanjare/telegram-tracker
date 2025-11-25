@@ -9,6 +9,31 @@ const db = require('./db'); // SQLite (better-sqlite3) DB connection
 const app = express();
 app.use(express.json());
 
+// ----- Pre-lead (fbc) DB statements -----
+// LP se aane wale JOIN click ko store karne ke liye
+const insertPreLeadStmt = db.prepare(`
+  INSERT INTO pre_leads (channel_id, fbc, created_at, used)
+  VALUES (?, ?, ?, 0)
+`);
+
+// join accept time par recent pre_lead nikalne ke liye
+const getRecentPreLeadStmt = db.prepare(`
+  SELECT id, fbc, created_at
+  FROM pre_leads
+  WHERE channel_id = ?
+    AND used = 0
+    AND created_at >= ?
+  ORDER BY created_at DESC
+  LIMIT 1
+`);
+
+// ek pre_lead ko used mark karne ke liye (taaki dubara use na ho)
+const markPreLeadUsedStmt = db.prepare(`
+  UPDATE pre_leads
+  SET used = 1
+  WHERE id = ?
+`);
+
 // ----- Config from env -----
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
@@ -66,6 +91,31 @@ app.get('/debug-channels', (req, res) => {
   } catch (err) {
     console.error('❌ Error reading channels:', err.message);
     res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// ----- LP se pre-lead capture (fbc store) -----
+// Landing page se call hoga:
+// POST /pre-lead
+// body: { channel_id: '<telegram_chat_id as string>', fbc: 'fb.1.xxx' }
+app.post('/pre-lead', (req, res) => {
+  try {
+    const { channel_id, fbc } = req.body || {};
+
+    if (!channel_id) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'channel_id required' });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+
+    insertPreLeadStmt.run(String(channel_id), fbc || null, now);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('❌ Error in /pre-lead:', err.message || err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
@@ -174,6 +224,26 @@ function getOrCreateChannelConfigFromJoin(joinRequest, nowTs) {
 // ----- Helper: Meta CAPI Lead + DB insert -----
 async function sendMetaLeadEvent(user, joinRequest) {
   const eventTime = Math.floor(Date.now() / 1000);
+  const channelId = String(joinRequest.chat.id);
+
+  // 🔹 Last 30 minutes ke andar iss channel ke liye koi pre_lead mila?
+  const thirtyMinutesAgo = eventTime - 30 * 60;
+  let fbcForThisLead = null;
+
+  try {
+    const row = getRecentPreLeadStmt.get(channelId, thirtyMinutesAgo);
+    if (row && row.fbc) {
+      fbcForThisLead = row.fbc;
+      // is pre_lead ko dobara use na ho isliye used mark karo
+      markPreLeadUsedStmt.run(row.id);
+    }
+  } catch (err) {
+    console.error(
+      '❌ Error fetching pre_lead for channel_id',
+      channelId,
+      err.message || err
+    );
+  }
 
   // Channel config (pixel, LP, client)
   const channelConfig = getOrCreateChannelConfigFromJoin(
@@ -197,6 +267,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
         action_source: 'system_generated',
         user_data: {
           external_id: externalIdHash,
+          ...(fbcForThisLead ? { fbc: fbcForThisLead } : {}),
         },
       },
     ],

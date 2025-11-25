@@ -42,6 +42,17 @@ db.exec(`
   );
 `);
 
+// 🔹 NEW TABLE: pre_leads (LP JOIN click → fbc store)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS pre_leads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    fbc TEXT,
+    created_at INTEGER NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+  );
+`);
+
 // --- Ensure ek default client row ho always (id=1) ---
 const defaultClient = db.prepare(`SELECT id FROM clients WHERE id = 1`).get();
 if (!defaultClient) {
