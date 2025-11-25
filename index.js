@@ -273,6 +273,9 @@ app.post('/pre-lead', (req, res) => {
 });
 
 // ----- Telegram webhook -----
+// 👉 Ab isko error-safe bana diya:
+// - Telegram approve fail hua → sirf log, webhook 200
+// - Meta CAPI fail hua → sirf log, webhook 200
 app.post('/telegram-webhook', async (req, res) => {
   const update = req.body;
   console.log('Incoming update:', JSON.stringify(update, null, 2));
@@ -283,22 +286,42 @@ app.post('/telegram-webhook', async (req, res) => {
       const user = jr.from;
       const chat = jr.chat;
 
-      // 1) Auto-approve join request
-      await approveJoinRequest(chat.id, user.id);
+      // 1) Try approve join request
+      try {
+        await approveJoinRequest(chat.id, user.id);
+        console.log('✅ Approved join request for user:', user.id);
+      } catch (e) {
+        console.error(
+          '❌ Telegram approveChatJoinRequest error:',
+          e.response?.data || e.message || e
+        );
+      }
 
-      // 2) Meta CAPI event + DB log
-      await sendMetaLeadEvent(user, jr);
-
-      console.log('✅ Approved & sent Meta Lead for user:', user.id);
+      // 2) Fire Meta CAPI in background (not blocking webhook)
+      try {
+        sendMetaLeadEvent(user, jr).catch((e) => {
+          console.error(
+            '❌ Meta CAPI sendMetaLeadEvent error:',
+            e.response?.data || e.message || e
+          );
+        });
+      } catch (e) {
+        console.error(
+          '❌ Meta CAPI (outer try) error:',
+          e.response?.data || e.message || e
+        );
+      }
     }
 
+    // ✅ Always reply 200 to Telegram so woh retry na kare
     res.sendStatus(200);
   } catch (err) {
     console.error(
-      '❌ Error in webhook handler:',
-      err.response?.data || err.message
+      '❌ Error in webhook handler (outer):',
+      err.response?.data || err.message || err
     );
-    res.sendStatus(500);
+    // still 200 to avoid Telegram retries spam
+    res.sendStatus(200);
   }
 });
 
