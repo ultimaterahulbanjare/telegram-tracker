@@ -22,16 +22,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// ----- Pre-lead (fbc) DB statements -----
+// ----- Pre-lead (fbc/fbp) DB statements -----
 // LP se aane wale JOIN click ko store karne ke liye
 const insertPreLeadStmt = db.prepare(`
-  INSERT INTO pre_leads (channel_id, fbc, created_at, used)
-  VALUES (?, ?, ?, 0)
+  INSERT INTO pre_leads (channel_id, fbc, fbp, created_at, used)
+  VALUES (?, ?, ?, ?, 0)
 `);
 
 // join accept time par recent pre_lead nikalne ke liye
 const getRecentPreLeadStmt = db.prepare(`
-  SELECT id, fbc, created_at
+  SELECT id, fbc, fbp, created_at
   FROM pre_leads
   WHERE channel_id = ?
     AND used = 0
@@ -107,13 +107,13 @@ app.get('/debug-channels', (req, res) => {
   }
 });
 
-// ----- LP se pre-lead capture (fbc store) -----
+// ----- LP se pre-lead capture (fbc/fbp store) -----
 // Landing page se call hoga:
 // POST /pre-lead
-// body: { channel_id: '<telegram_chat_id as string>', fbc: 'fb.1.xxx' }
+// body: { channel_id: '<telegram_chat_id as string>', fbc: 'fb.1.xxx', fbp: 'fb.1.xxx' }
 app.post('/pre-lead', (req, res) => {
   try {
-    const { channel_id, fbc } = req.body || {};
+    const { channel_id, fbc, fbp } = req.body || {};
 
     if (!channel_id) {
       return res
@@ -123,7 +123,12 @@ app.post('/pre-lead', (req, res) => {
 
     const now = Math.floor(Date.now() / 1000);
 
-    insertPreLeadStmt.run(String(channel_id), fbc || null, now);
+    insertPreLeadStmt.run(
+      String(channel_id),
+      fbc || null,
+      fbp || null,
+      now
+    );
 
     return res.json({ ok: true });
   } catch (err) {
@@ -242,11 +247,13 @@ async function sendMetaLeadEvent(user, joinRequest) {
   // 🔹 Last 30 minutes ke andar iss channel ke liye koi pre_lead mila?
   const thirtyMinutesAgo = eventTime - 30 * 60;
   let fbcForThisLead = null;
+  let fbpForThisLead = null;
 
   try {
     const row = getRecentPreLeadStmt.get(channelId, thirtyMinutesAgo);
-    if (row && row.fbc) {
-      fbcForThisLead = row.fbc;
+    if (row) {
+      if (row.fbc) fbcForThisLead = row.fbc;
+      if (row.fbp) fbpForThisLead = row.fbp;
       // is pre_lead ko dobara use na ho isliye used mark karo
       markPreLeadUsedStmt.run(row.id);
     }
@@ -258,8 +265,8 @@ async function sendMetaLeadEvent(user, joinRequest) {
     );
   }
 
-  // ⭐ NEW: debug log to see which fbc was used
-  console.log('Using fbcForThisLead:', fbcForThisLead);
+  // ⭐ Debug log to see which fbc/fbp were used
+  console.log('Using fbcForThisLead:', fbcForThisLead, 'fbpForThisLead:', fbpForThisLead);
 
   // Channel config (pixel, LP, client)
   const channelConfig = getOrCreateChannelConfigFromJoin(
@@ -284,6 +291,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
         user_data: {
           external_id: externalIdHash,
           ...(fbcForThisLead ? { fbc: fbcForThisLead } : {}),
+          ...(fbpForThisLead ? { fbp: fbpForThisLead } : {}),
         },
       },
     ],

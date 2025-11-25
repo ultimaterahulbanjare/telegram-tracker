@@ -42,16 +42,29 @@ db.exec(`
   );
 `);
 
-// 🔹 NEW TABLE: pre_leads (LP JOIN click → fbc store)
+// --- Table: pre_leads (LP JOIN click + tracking data) ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS pre_leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id TEXT NOT NULL,
     fbc TEXT,
+    fbp TEXT,
     created_at INTEGER NOT NULL,
     used INTEGER NOT NULL DEFAULT 0
   );
 `);
+
+// 🔹 Safe migration: agar purani pre_leads table me fbp column nahi hai to add karo
+try {
+  const cols = db.prepare("PRAGMA table_info(pre_leads)").all();
+  const hasFbp = cols.some(c => c.name === 'fbp');
+  if (!hasFbp) {
+    db.exec(`ALTER TABLE pre_leads ADD COLUMN fbp TEXT;`);
+    console.log("✅ Added fbp column to pre_leads");
+  }
+} catch (e) {
+  console.log("ℹ️ pre_leads fbp migration check error:", e.message);
+}
 
 // --- Ensure ek default client row ho always (id=1) ---
 const defaultClient = db.prepare(`SELECT id FROM clients WHERE id = 1`).get();
