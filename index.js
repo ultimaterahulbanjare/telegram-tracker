@@ -12,9 +12,9 @@ app.use(express.json());
 // ----- Config from env -----
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const ADMIN_KEY = process.env.ADMIN_KEY || "secret123";
 
 // Default Pixel & LP (fallback)
-// Agar channels table me custom pixel_id / lp_url nahin milega to ye use hoga
 const DEFAULT_META_PIXEL_ID = '1340877837162888';
 const DEFAULT_PUBLIC_LP_URL = 'https://tourmaline-flan-4abc0c.netlify.app/';
 
@@ -26,13 +26,10 @@ function hashSha256(str) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
-// Date ko YYYY-MM-DD format me convert (stats ke liye)
+// Date format helper
 function formatDateYYYYMMDD(timestamp) {
   const d = new Date(timestamp * 1000);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 // ----- Health check route -----
@@ -40,30 +37,22 @@ app.get('/', (req, res) => {
   res.send('Telegram Funnel Bot running ✅');
 });
 
-// OPTIONAL: Debug route to see last joins from DB
+// Debug joins
 app.get('/debug-joins', (req, res) => {
   try {
-    const rows = db
-      .prepare('SELECT * FROM joins ORDER BY id DESC LIMIT 20')
-      .all();
-
+    const rows = db.prepare('SELECT * FROM joins ORDER BY id DESC LIMIT 20').all();
     res.json(rows);
   } catch (err) {
-    console.error('❌ Error reading DB:', err.message);
     res.status(500).json({ error: 'DB error' });
   }
 });
 
-// OPTIONAL: Debug route to see channels config
+// Debug channels
 app.get('/debug-channels', (req, res) => {
   try {
-    const rows = db
-      .prepare('SELECT * FROM channels ORDER BY id DESC LIMIT 20')
-      .all();
-
+    const rows = db.prepare('SELECT * FROM channels ORDER BY id DESC LIMIT 20').all();
     res.json(rows);
   } catch (err) {
-    console.error('❌ Error reading channels:', err.message);
     res.status(500).json({ error: 'DB error' });
   }
 });
@@ -71,59 +60,45 @@ app.get('/debug-channels', (req, res) => {
 // ----- MAIN: Telegram webhook -----
 app.post('/telegram-webhook', async (req, res) => {
   const update = req.body;
-  console.log('Incoming update:', JSON.stringify(update, null, 2));
+  console.log("Incoming:", JSON.stringify(update,null,2));
 
   try {
-    // 1) Join request ko handle karo
     if (update.chat_join_request) {
       const jr = update.chat_join_request;
       const user = jr.from;
       const chat = jr.chat;
 
-      // 1. Auto-approve join request
       await approveJoinRequest(chat.id, user.id);
-
-      // 2. Meta CAPI Lead event bhejo + DB me store karo (multi-channel aware)
       await sendMetaLeadEvent(user, jr);
 
-      console.log('✅ Approved & sent Meta Lead for user:', user.id);
+      console.log("✅ Approved & Lead sent:", user.id);
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error(
-      '❌ Error in webhook handler:',
-      err.response?.data || err.message
-    );
+    console.error("❌ webhook error:", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
 
-// ----- Helper: approve join request -----
+// Approve request
 async function approveJoinRequest(chatId, userId) {
-  const url = `${TELEGRAM_API}/approveChatJoinRequest`;
-  const payload = {
+  await axios.post(`${TELEGRAM_API}/approveChatJoinRequest`, {
     chat_id: chatId,
     user_id: userId,
-  };
-
-  const res = await axios.post(url, payload);
-  console.log('Telegram approve response:', res.data);
+  });
 }
 
-// ----- Helper: ensure channel row exists, and return config -----
+// Channel config getter/creator
 function getOrCreateChannelConfigFromJoin(jr, nowTs) {
   const chat = jr.chat;
   const telegramChatId = String(chat.id);
 
-  // Check existing
-  let channel = db
-    .prepare('SELECT * FROM channels WHERE telegram_chat_id = ?')
+  let channel = db.prepare("SELECT * FROM channels WHERE telegram_chat_id = ?")
     .get(telegramChatId);
 
   if (!channel) {
-    // Auto-create basic channel row with default pixel/LP
-    const stmt = db.prepare(`
+    const info = db.prepare(`
       INSERT INTO channels (
         client_id,
         telegram_chat_id,
@@ -133,18 +108,14 @@ function getOrCreateChannelConfigFromJoin(jr, nowTs) {
         lp_url,
         created_at,
         is_active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `);
-
-    const createdAt = nowTs;
-    const info = stmt.run(
-      1,                        // default client_id (future me proper client mapping karenge)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, 1)
+    `).run(
       telegramChatId,
       chat.title || null,
-      null,                     // deep_link abhi null
+      null,
       DEFAULT_META_PIXEL_ID,
       DEFAULT_PUBLIC_LP_URL,
-      createdAt
+      nowTs
     );
 
     channel = {
@@ -155,29 +126,17 @@ function getOrCreateChannelConfigFromJoin(jr, nowTs) {
       deep_link: null,
       pixel_id: DEFAULT_META_PIXEL_ID,
       lp_url: DEFAULT_PUBLIC_LP_URL,
-      created_at: createdAt,
-      is_active: 1,
+      created_at: nowTs,
+      is_active: 1
     };
-
-    console.log('🆕 Auto-created channel row:', channel);
-  } else {
-    // Title change ho gaya ho to update kar sakte hai (optional)
-    if (chat.title && chat.title !== channel.telegram_title) {
-      db.prepare(
-        'UPDATE channels SET telegram_title = ? WHERE id = ?'
-      ).run(chat.title, channel.id);
-      channel.telegram_title = chat.title;
-    }
   }
 
   return channel;
 }
 
-// ----- Helper: send Meta CAPI Lead + DB insert (multi-channel aware) -----
+// Meta + DB
 async function sendMetaLeadEvent(user, joinRequest) {
   const eventTime = Math.floor(Date.now() / 1000);
-
-  // Channel config nikaalo (ya auto-create karo agar nahi hai)
   const channel = getOrCreateChannelConfigFromJoin(joinRequest, eventTime);
 
   const pixelId = channel.pixel_id || DEFAULT_META_PIXEL_ID;
@@ -185,329 +144,88 @@ async function sendMetaLeadEvent(user, joinRequest) {
 
   const url = `https://graph.facebook.com/v18.0/${pixelId}/events?access_token=${META_ACCESS_TOKEN}`;
 
-  // Telegram user id ko external_id ke roop me hash kar rahe hain
-  const externalIdHash = hashSha256(String(user.id));
-
   const payload = {
-    data: [
-      {
-        event_name: 'Lead',
-        event_time: eventTime,
-        event_source_url: lpUrl,
-        action_source: 'system_generated',
-        user_data: {
-          external_id: externalIdHash,
-        },
-      },
-    ],
+    data: [{
+      event_name: "Lead",
+      event_time: eventTime,
+      event_source_url: lpUrl,
+      action_source: "system_generated",
+      user_data: {
+        external_id: hashSha256(String(user.id))
+      }
+    }]
   };
 
-  // 1) Meta CAPI ko event bhejo
-  const res = await axios.post(url, payload);
-  console.log('Meta CAPI response:', res.data);
+  await axios.post(url, payload);
 
-  // 2) DB me join log store karo (joins table)
-  const stmt = db.prepare(`
+  db.prepare(`
     INSERT INTO joins 
-      (telegram_user_id, telegram_username, channel_id, channel_title, joined_at, meta_event_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
-  const chat = joinRequest.chat;
-
-  stmt.run(
+      (telegram_user_id, telegram_username, channel_id, channel_title, joined_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
     String(user.id),
     user.username || null,
-    String(chat.id),          // Telegram chat.id ko hi "channel_id" column me rakh rahe hain
-    chat.title || null,
-    eventTime,
-    null // meta_event_id future ke liye
+    String(joinRequest.chat.id),
+    joinRequest.chat.title || null,
+    eventTime
   );
-
-  console.log('✅ Join stored in DB for user:', user.id);
 }
 
-// ----- JSON Stats API: /api/stats -----
-app.get('/api/stats', (req, res) => {
+// ----- ADMIN: update channel -----
+app.post("/admin/update-channel", (req,res)=>{
   try {
-    // 1) Total joins
-    const totalRow = db.prepare('SELECT COUNT(*) AS cnt FROM joins').get();
-    const totalJoins = totalRow.cnt || 0;
+    const { admin_key, telegram_chat_id, pixel_id, lp_url, client_id, deep_link } = req.body;
 
-    // 2) Today joins (server time ke hisaab se)
-    const now = Math.floor(Date.now() / 1000);
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const startOfDayTs = Math.floor(startOfDay.getTime() / 1000);
-
-    const todayRow = db
-      .prepare(
-        'SELECT COUNT(*) AS cnt FROM joins WHERE joined_at >= ? AND joined_at <= ?'
-      )
-      .get(startOfDayTs, now);
-    const todayJoins = todayRow.cnt || 0;
-
-    // 3) Last 7 days breakdown
-    const sevenDaysAgoTs = now - 7 * 24 * 60 * 60;
-    const rows7 = db
-      .prepare(
-        'SELECT joined_at FROM joins WHERE joined_at >= ? ORDER BY joined_at ASC'
-      )
-      .all(sevenDaysAgoTs);
-
-    const byDateMap = {};
-    for (const r of rows7) {
-      const dateKey = formatDateYYYYMMDD(r.joined_at);
-      if (!byDateMap[dateKey]) byDateMap[dateKey] = 0;
-      byDateMap[dateKey] += 1;
+    if(admin_key !== ADMIN_KEY){
+      return res.status(401).json({ok:false,error:"Unauthorized"});
     }
 
-    const last7Days = Object.keys(byDateMap)
-      .sort()
-      .map((date) => ({
-        date,
-        count: byDateMap[date],
-      }));
+    const channel = db.prepare("SELECT * FROM channels WHERE telegram_chat_id=?")
+      .get(String(telegram_chat_id));
 
-    // 4) By channel summary (joins table se)
-    const channels = db
-      .prepare(`
-        SELECT 
-          channel_id,
-          channel_title,
-          COUNT(*) AS total
-        FROM joins
-        GROUP BY channel_id, channel_title
-        ORDER BY total DESC
-      `)
-      .all();
+    if(!channel){
+      return res.status(404).json({ok:false,error:"Channel not found"});
+    }
 
-    res.json({
-      ok: true,
-      total_joins: totalJoins,
-      today_joins: todayJoins,
-      last_7_days: last7Days,
-      by_channel: channels,
-    });
-  } catch (err) {
-    console.error('❌ Error in /api/stats:', err);
-    res.status(500).json({ ok: false, error: 'Internal error' });
+    db.prepare(`
+      UPDATE channels
+      SET pixel_id=?, lp_url=?, client_id=?, deep_link=?
+      WHERE telegram_chat_id=?
+    `).run(
+      pixel_id || channel.pixel_id,
+      lp_url || channel.lp_url,
+      client_id || channel.client_id,
+      deep_link || channel.deep_link,
+      String(telegram_chat_id)
+    );
+
+    res.json({ok:true,message:"Updated"});
+  } catch(err){
+    res.status(500).json({ok:false,error:"Internal"});
   }
 });
 
-// ----- HTML Dashboard: /dashboard -----
-app.get('/dashboard', (req, res) => {
-  try {
-    const totalRow = db.prepare('SELECT COUNT(*) AS cnt FROM joins').get();
-    const totalJoins = totalRow.cnt || 0;
+// ----- STATS API -----
+app.get('/api/stats',(req,res)=>{
+  try{
+    const total = db.prepare("SELECT COUNT(*) AS c FROM joins").get().c;
+    const today = db.prepare(`
+      SELECT COUNT(*) AS c FROM joins
+      WHERE joined_at >= ?
+    `).get(Math.floor(new Date().setHours(0,0,0,0)/1000)).c;
 
-    const now = Math.floor(Date.now() / 1000);
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const startOfDayTs = Math.floor(startOfDay.getTime() / 1000);
+    const channels = db.prepare(`
+      SELECT channel_id, channel_title, COUNT(*) AS total
+      FROM joins GROUP BY channel_id
+    `).all();
 
-    const todayRow = db
-      .prepare(
-        'SELECT COUNT(*) AS cnt FROM joins WHERE joined_at >= ? AND joined_at <= ?'
-      )
-      .get(startOfDayTs, now);
-    const todayJoins = todayRow.cnt || 0;
-
-    const sevenDaysAgoTs = now - 7 * 24 * 60 * 60;
-    const rows7 = db
-      .prepare(
-        'SELECT joined_at FROM joins WHERE joined_at >= ? ORDER BY joined_at ASC'
-      )
-      .all(sevenDaysAgoTs);
-
-    const byDateMap = {};
-    for (const r of rows7) {
-      const dateKey = formatDateYYYYMMDD(r.joined_at);
-      if (!byDateMap[dateKey]) byDateMap[dateKey] = 0;
-      byDateMap[dateKey] += 1;
-    }
-
-    const last7Days = Object.keys(byDateMap)
-      .sort()
-      .map((date) => ({
-        date,
-        count: byDateMap[date],
-      }));
-
-    const channels = db
-      .prepare(`
-        SELECT 
-          channel_id,
-          channel_title,
-          COUNT(*) AS total
-        FROM joins
-        GROUP BY channel_id, channel_title
-        ORDER BY total DESC
-      `)
-      .all();
-
-    // Simple HTML render
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8" />
-        <title>Telegram Funnel Stats</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          body {
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #0f172a;
-            color: #e5e7eb;
-            padding: 24px;
-          }
-          .container {
-            max-width: 900px;
-            margin: 0 auto;
-          }
-          h1 {
-            font-size: 24px;
-            margin-bottom: 16px;
-          }
-          .cards {
-            display: flex;
-            gap: 16px;
-            flex-wrap: wrap;
-            margin-bottom: 24px;
-          }
-          .card {
-            background: #111827;
-            border-radius: 12px;
-            padding: 16px 18px;
-            flex: 1 1 180px;
-            min-width: 180px;
-          }
-          .card h2 {
-            font-size: 14px;
-            color: #9ca3af;
-            margin-bottom: 8px;
-          }
-          .card .value {
-            font-size: 22px;
-            font-weight: 600;
-          }
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 24px;
-          }
-          th, td {
-            padding: 8px 10px;
-            border-bottom: 1px solid #1f2937;
-            font-size: 13px;
-          }
-          th {
-            text-align: left;
-            color: #9ca3af;
-          }
-          tr:hover {
-            background: #111827;
-          }
-          .section-title {
-            font-size: 16px;
-            margin: 16px 0 8px;
-          }
-          .muted {
-            color: #6b7280;
-            font-size: 12px;
-          }
-          @media (max-width: 600px) {
-            .cards {
-              flex-direction: column;
-            }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>Telegram Funnel Stats 📊</h1>
-
-          <div class="cards">
-            <div class="card">
-              <h2>Total Joins</h2>
-              <div class="value">${totalJoins}</div>
-            </div>
-            <div class="card">
-              <h2>Today Joins</h2>
-              <div class="value">${todayJoins}</div>
-            </div>
-          </div>
-
-          <div>
-            <div class="section-title">Last 7 Days</div>
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Joins</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${
-                  last7Days.length === 0
-                    ? `<tr><td colspan="2" class="muted">No data yet</td></tr>`
-                    : last7Days
-                        .map(
-                          (d) => `
-                  <tr>
-                    <td>${d.date}</td>
-                    <td>${d.count}</td>
-                  </tr>`
-                        )
-                        .join('')
-                }
-              </tbody>
-            </table>
-          </div>
-
-          <div>
-            <div class="section-title">By Channel</div>
-            <table>
-              <thead>
-                <tr>
-                  <th>Channel Title</th>
-                  <th>Channel ID</th>
-                  <th>Total Joins</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${
-                  channels.length === 0
-                    ? `<tr><td colspan="3" class="muted">No data yet</td></tr>`
-                    : channels
-                        .map(
-                          (c) => `
-                  <tr>
-                    <td>${c.channel_title || '(no title)'}</td>
-                    <td>${c.channel_id}</td>
-                    <td>${c.total}</td>
-                  </tr>`
-                        )
-                        .join('')
-                }
-              </tbody>
-            </table>
-          </div>
-
-          <div class="muted">
-            Simple v1 dashboard – future: add client login, filters, date range, etc.
-          </div>
-        </div>
-      </body>
-      </html>
-    `);
-  } catch (err) {
-    console.error('❌ Error in /dashboard:', err);
-    res.status(500).send('Internal error');
+    res.json({ok:true,total,today,channels});
+  }catch(err){
+    res.status(500).json({ok:false});
   }
 });
 
 // ----- Start server -----
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server running on ${PORT}`);
 });

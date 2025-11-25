@@ -18,18 +18,18 @@ db.exec(`
 db.exec(`
   CREATE TABLE IF NOT EXISTS channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id INTEGER,             -- kis client ka channel hai (future use)
-    telegram_chat_id TEXT UNIQUE,  -- Telegram ka chat.id (e.g. -1002065xxxxx)
+    client_id INTEGER,
+    telegram_chat_id TEXT UNIQUE,
     telegram_title TEXT,
-    deep_link TEXT,                -- t.me/+... link (optional)
-    pixel_id TEXT,                 -- is channel ka Pixel ID
-    lp_url TEXT,                   -- is channel ka LP URL
+    deep_link TEXT,
+    pixel_id TEXT,
+    lp_url TEXT,
     created_at INTEGER,
     is_active INTEGER DEFAULT 1
   );
 `);
 
-// --- Table: joins log (pehle se tha, as it is) ---
+// --- Table: joins log ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS joins (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,9 +37,21 @@ db.exec(`
     telegram_username TEXT,
     channel_id TEXT,
     channel_title TEXT,
-    joined_at INTEGER,       -- UNIX timestamp (seconds)
-    meta_event_id TEXT       -- optional future use
+    joined_at INTEGER,
+    meta_event_id TEXT
   );
 `);
+
+// --- Ensure ek default client row ho always (id=1) ---
+const defaultClient = db.prepare(`SELECT id FROM clients WHERE id = 1`).get();
+if (!defaultClient) {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(`
+    INSERT INTO clients (id, name, email, api_key, created_at)
+    VALUES (1, 'Default Client', 'default@example.com', 'DEFAULT_KEY', ?)
+  `).run(now);
+
+  console.log("✅ Default client created (id=1)");
+}
 
 module.exports = db;
