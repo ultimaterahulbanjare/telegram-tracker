@@ -57,7 +57,7 @@ function getCountryFromHeaders(req) {
   return null;
 }
 
-// Simple user-agent parser
+// Simple user-agent parser (approx, but kaam ka)
 function parseUserAgent(uaRaw) {
   const ua = (uaRaw || '').toLowerCase();
 
@@ -88,9 +88,6 @@ function parseUserAgent(uaRaw) {
 }
 
 // ----- Pre-lead (fbc/fbp + tracking) DB statements -----
-// NOTE: iske liye tumhare DB me pre_leads table me ye columns hone chahiye:
-// channel_id, fbc, fbp, ip, country, user_agent, device_type, browser, os, source,
-// utm_source, utm_medium, utm_campaign, utm_content, utm_term, created_at, used
 const insertPreLeadStmt = db.prepare(`
   INSERT INTO pre_leads (
     channel_id,
@@ -110,7 +107,7 @@ const insertPreLeadStmt = db.prepare(`
     utm_term,
     created_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const getRecentPreLeadStmt = db.prepare(`
@@ -133,17 +130,12 @@ const getRecentPreLeadStmt = db.prepare(`
     created_at
   FROM pre_leads
   WHERE channel_id = ?
-    AND used = 0
     AND created_at >= ?
   ORDER BY created_at DESC
   LIMIT 1
 `);
 
-const markPreLeadUsedStmt = db.prepare(`
-  UPDATE pre_leads
-  SET used = 1
-  WHERE id = ?
-`);
+const markPreLeadUsedStmt = null; // used column optional; abhi hum use nahi kar rahe
 
 // ----- Config from env -----
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -158,10 +150,13 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const PORT = process.env.PORT || 3000;
 
 // ----- Helpers -----
+
+// Meta user_data ke liye hash
 function hashSha256(str) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
+// Date ko YYYY-MM-DD string me
 function formatDateYYYYMMDD(timestamp) {
   const d = new Date(timestamp * 1000);
   const year = d.getFullYear();
@@ -170,6 +165,7 @@ function formatDateYYYYMMDD(timestamp) {
   return `${year}-${month}-${day}`;
 }
 
+// Random event_id for Meta dedup
 function generateEventId() {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -281,7 +277,7 @@ app.post('/telegram-webhook', async (req, res) => {
         );
       }
 
-      // 2) Fire Meta CAPI in background (non-blocking)
+      // 2) Fire Meta CAPI in background (not blocking webhook)
       try {
         sendMetaLeadEvent(user, jr).catch((e) => {
           console.error(
@@ -297,13 +293,14 @@ app.post('/telegram-webhook', async (req, res) => {
       }
     }
 
-    // ✅ Always reply 200 to Telegram
+    // ✅ Always reply 200 to Telegram so woh retry na kare
     res.sendStatus(200);
   } catch (err) {
     console.error(
       '❌ Error in webhook handler (outer):',
       err.response?.data || err.message || err
     );
+    // still 200 to avoid Telegram retries spam
     res.sendStatus(200);
   }
 });
@@ -330,6 +327,7 @@ function getOrCreateChannelConfigFromJoin(joinRequest, nowTs) {
     .get(telegramChatId);
 
   if (!channel) {
+    // Agar channel row nahi hai to naya bana do (default client_id = 1)
     const stmt = db.prepare(`
       INSERT INTO channels (
         client_id,
@@ -344,10 +342,10 @@ function getOrCreateChannelConfigFromJoin(joinRequest, nowTs) {
     `);
 
     const info = stmt.run(
-      1,
+      1, // default client
       telegramChatId,
       chat.title || null,
-      null,
+      null, // deep_link abhi null
       DEFAULT_META_PIXEL_ID,
       DEFAULT_PUBLIC_LP_URL,
       nowTs
@@ -367,6 +365,7 @@ function getOrCreateChannelConfigFromJoin(joinRequest, nowTs) {
 
     console.log('🆕 Auto-created channel row:', channel);
   } else {
+    // Optionally: agar title change ho gaya ho to update
     if (chat.title && chat.title !== channel.telegram_title) {
       db.prepare(
         'UPDATE channels SET telegram_title = ? WHERE id = ?'
@@ -383,6 +382,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const eventTime = Math.floor(Date.now() / 1000);
   const channelId = String(joinRequest.chat.id);
 
+  // 🔹 Last 30 minutes ke andar iss channel ke liye koi pre_lead mila?
   const thirtyMinutesAgo = eventTime - 30 * 60;
   let fbcForThisLead = null;
   let fbpForThisLead = null;
@@ -418,8 +418,6 @@ async function sendMetaLeadEvent(user, joinRequest) {
       utmCampaignForThisLead = row.utm_campaign || null;
       utmContentForThisLead = row.utm_content || null;
       utmTermForThisLead = row.utm_term || null;
-
-      markPreLeadUsedStmt.run(row.id);
     }
   } catch (err) {
     console.error(
@@ -429,6 +427,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
     );
   }
 
+  // ⭐ Debug log to see which fbc/fbp were used
   console.log('Using fbcForThisLead:', fbcForThisLead, 'fbpForThisLead:', fbpForThisLead);
   console.log('Tracking for lead:', {
     ipForThisLead,
@@ -445,6 +444,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
     utmTermForThisLead,
   });
 
+  // Channel config (pixel, LP, client)
   const channelConfig = getOrCreateChannelConfigFromJoin(
     joinRequest,
     eventTime
@@ -492,10 +492,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const res = await axios.post(url, payload);
   console.log('Meta CAPI response:', res.data);
 
-  // NOTE: iske liye joins table me ye columns hone chahiye:
-  // telegram_user_id, telegram_username, channel_id, channel_title, joined_at,
-  // meta_event_id, ip, country, user_agent, device_type, browser, os,
-  // source, utm_source, utm_medium, utm_campaign, utm_content, utm_term
+  // ✅ Joins table me log karein – ID ko insert nahi kar rahe, SQLite auto increment karega
   db.prepare(
     `
     INSERT INTO joins 
@@ -519,7 +516,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
         utm_content,
         utm_term
       )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
   ).run(
     String(user.id),
@@ -545,7 +542,7 @@ async function sendMetaLeadEvent(user, joinRequest) {
   console.log('✅ Join stored in DB for user:', user.id);
 }
 
-// ----- ADMIN: update channel config -----
+// ----- ADMIN: update channel config (pixel, LP, client, deep link) -----
 app.post('/admin/update-channel', (req, res) => {
   try {
     const {
@@ -616,9 +613,11 @@ app.post('/admin/update-channel', (req, res) => {
 // ----- JSON Stats API: /api/stats -----
 app.get('/api/stats', (req, res) => {
   try {
+    // Total joins
     const totalRow = db.prepare('SELECT COUNT(*) AS cnt FROM joins').get();
     const totalJoins = totalRow.cnt || 0;
 
+    // Today joins
     const now = Math.floor(Date.now() / 1000);
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -631,6 +630,7 @@ app.get('/api/stats', (req, res) => {
       .get(startOfDayTs, now);
     const todayJoins = todayRow.cnt || 0;
 
+    // Last 7 days breakdown
     const sevenDaysAgoTs = now - 7 * 24 * 60 * 60;
     const rows7 = db
       .prepare(
@@ -648,6 +648,7 @@ app.get('/api/stats', (req, res) => {
       .sort()
       .map((date) => ({ date, count: byDateMap[date] }));
 
+    // By channel
     const channels = db
       .prepare(
         `
@@ -662,6 +663,7 @@ app.get('/api/stats', (req, res) => {
       )
       .all();
 
+    // Recent joins with tracking (for UI)
     const recentJoins = db
       .prepare(
         `
@@ -777,6 +779,7 @@ app.get('/dashboard', (req, res) => {
       )
       .all();
 
+    // Simple HTML UI
     res.send(`
       <!DOCTYPE html>
       <html lang="en">
