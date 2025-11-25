@@ -56,7 +56,6 @@ function getCountryFromHeaders(req) {
   return null;
 }
 
-
 // Simple user-agent parser (approx, but kaam ka)
 function parseUserAgent(uaRaw) {
   const ua = (uaRaw || '').toLowerCase();
@@ -106,10 +105,9 @@ const insertPreLeadStmt = db.prepare(`
     utm_campaign,
     utm_content,
     utm_term,
-    created_at,
-    used
+    created_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 // join accept time par recent pre_lead nikalne ke liye
