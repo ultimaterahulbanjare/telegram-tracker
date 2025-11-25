@@ -1,3 +1,4 @@
+
 // Load environment variables from .env (Render / local dono ke liye)
 require('dotenv').config();
 
@@ -87,6 +88,9 @@ function parseUserAgent(uaRaw) {
 }
 
 // ----- Pre-lead (fbc/fbp + tracking) DB statements -----
+// NOTE: iske liye tumhare DB me pre_leads table me ye columns hone chahiye:
+// channel_id, fbc, fbp, ip, country, user_agent, device_type, browser, os, source,
+// utm_source, utm_medium, utm_campaign, utm_content, utm_term, created_at, used
 const insertPreLeadStmt = db.prepare(`
   INSERT INTO pre_leads (
     channel_id,
@@ -106,7 +110,7 @@ const insertPreLeadStmt = db.prepare(`
     utm_term,
     created_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const getRecentPreLeadStmt = db.prepare(`
@@ -194,7 +198,7 @@ app.get('/debug-channels', (req, res) => {
     const rows = db
       .prepare('SELECT * FROM channels ORDER BY id DESC LIMIT 20')
       .all();
-  res.json(rows);
+    res.json(rows);
   } catch (err) {
     console.error('❌ Error reading channels:', err.message);
     res.status(500).json({ error: 'DB error' });
@@ -488,7 +492,10 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const res = await axios.post(url, payload);
   console.log('Meta CAPI response:', res.data);
 
-  // Joins table me log karein (18 columns / 18 values)
+  // NOTE: iske liye joins table me ye columns hone chahiye:
+  // telegram_user_id, telegram_username, channel_id, channel_title, joined_at,
+  // meta_event_id, ip, country, user_agent, device_type, browser, os,
+  // source, utm_source, utm_medium, utm_campaign, utm_content, utm_term
   db.prepare(
     `
     INSERT INTO joins 
