@@ -13,9 +13,10 @@ app.use(express.json());
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
-// Pixel & LP URL (Pixel ID yahi change karna hoga)
-const META_PIXEL_ID = '1340877837162888';
-const PUBLIC_LP_URL = 'https://tourmaline-flan-4abc0c.netlify.app/';
+// Default Pixel & LP (fallback)
+// Agar channels table me custom pixel_id / lp_url nahin milega to ye use hoga
+const DEFAULT_META_PIXEL_ID = '1340877837162888';
+const DEFAULT_PUBLIC_LP_URL = 'https://tourmaline-flan-4abc0c.netlify.app/';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const PORT = process.env.PORT || 3000;
@@ -53,6 +54,20 @@ app.get('/debug-joins', (req, res) => {
   }
 });
 
+// OPTIONAL: Debug route to see channels config
+app.get('/debug-channels', (req, res) => {
+  try {
+    const rows = db
+      .prepare('SELECT * FROM channels ORDER BY id DESC LIMIT 20')
+      .all();
+
+    res.json(rows);
+  } catch (err) {
+    console.error('❌ Error reading channels:', err.message);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
 // ----- MAIN: Telegram webhook -----
 app.post('/telegram-webhook', async (req, res) => {
   const update = req.body;
@@ -68,7 +83,7 @@ app.post('/telegram-webhook', async (req, res) => {
       // 1. Auto-approve join request
       await approveJoinRequest(chat.id, user.id);
 
-      // 2. Meta CAPI Lead event bhejo + DB me store karo
+      // 2. Meta CAPI Lead event bhejo + DB me store karo (multi-channel aware)
       await sendMetaLeadEvent(user, jr);
 
       console.log('✅ Approved & sent Meta Lead for user:', user.id);
@@ -96,20 +111,89 @@ async function approveJoinRequest(chatId, userId) {
   console.log('Telegram approve response:', res.data);
 }
 
-// ----- Helper: send Meta CAPI Lead + DB insert -----
+// ----- Helper: ensure channel row exists, and return config -----
+function getOrCreateChannelConfigFromJoin(jr, nowTs) {
+  const chat = jr.chat;
+  const telegramChatId = String(chat.id);
+
+  // Check existing
+  let channel = db
+    .prepare('SELECT * FROM channels WHERE telegram_chat_id = ?')
+    .get(telegramChatId);
+
+  if (!channel) {
+    // Auto-create basic channel row with default pixel/LP
+    const stmt = db.prepare(`
+      INSERT INTO channels (
+        client_id,
+        telegram_chat_id,
+        telegram_title,
+        deep_link,
+        pixel_id,
+        lp_url,
+        created_at,
+        is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+
+    const createdAt = nowTs;
+    const info = stmt.run(
+      1,                        // default client_id (future me proper client mapping karenge)
+      telegramChatId,
+      chat.title || null,
+      null,                     // deep_link abhi null
+      DEFAULT_META_PIXEL_ID,
+      DEFAULT_PUBLIC_LP_URL,
+      createdAt
+    );
+
+    channel = {
+      id: info.lastInsertRowid,
+      client_id: 1,
+      telegram_chat_id: telegramChatId,
+      telegram_title: chat.title || null,
+      deep_link: null,
+      pixel_id: DEFAULT_META_PIXEL_ID,
+      lp_url: DEFAULT_PUBLIC_LP_URL,
+      created_at: createdAt,
+      is_active: 1,
+    };
+
+    console.log('🆕 Auto-created channel row:', channel);
+  } else {
+    // Title change ho gaya ho to update kar sakte hai (optional)
+    if (chat.title && chat.title !== channel.telegram_title) {
+      db.prepare(
+        'UPDATE channels SET telegram_title = ? WHERE id = ?'
+      ).run(chat.title, channel.id);
+      channel.telegram_title = chat.title;
+    }
+  }
+
+  return channel;
+}
+
+// ----- Helper: send Meta CAPI Lead + DB insert (multi-channel aware) -----
 async function sendMetaLeadEvent(user, joinRequest) {
-  const url = `https://graph.facebook.com/v18.0/${META_PIXEL_ID}/events?access_token=${META_ACCESS_TOKEN}`;
+  const eventTime = Math.floor(Date.now() / 1000);
+
+  // Channel config nikaalo (ya auto-create karo agar nahi hai)
+  const channel = getOrCreateChannelConfigFromJoin(joinRequest, eventTime);
+
+  const pixelId = channel.pixel_id || DEFAULT_META_PIXEL_ID;
+  const lpUrl = channel.lp_url || DEFAULT_PUBLIC_LP_URL;
+
+  const url = `https://graph.facebook.com/v18.0/${pixelId}/events?access_token=${META_ACCESS_TOKEN}`;
 
   // Telegram user id ko external_id ke roop me hash kar rahe hain
   const externalIdHash = hashSha256(String(user.id));
-  const eventTime = Math.floor(Date.now() / 1000);
 
   const payload = {
     data: [
       {
         event_name: 'Lead',
         event_time: eventTime,
-        event_source_url: PUBLIC_LP_URL,
+        event_source_url: lpUrl,
         action_source: 'system_generated',
         user_data: {
           external_id: externalIdHash,
@@ -122,20 +206,20 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const res = await axios.post(url, payload);
   console.log('Meta CAPI response:', res.data);
 
-  // 2) DB me join log store karo
+  // 2) DB me join log store karo (joins table)
   const stmt = db.prepare(`
     INSERT INTO joins 
       (telegram_user_id, telegram_username, channel_id, channel_title, joined_at, meta_event_id)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
-  const channel = joinRequest.chat;
+  const chat = joinRequest.chat;
 
   stmt.run(
     String(user.id),
     user.username || null,
-    String(channel.id),
-    channel.title || null,
+    String(chat.id),          // Telegram chat.id ko hi "channel_id" column me rakh rahe hain
+    chat.title || null,
     eventTime,
     null // meta_event_id future ke liye
   );
@@ -185,7 +269,7 @@ app.get('/api/stats', (req, res) => {
         count: byDateMap[date],
       }));
 
-    // 4) By channel summary
+    // 4) By channel summary (joins table se)
     const channels = db
       .prepare(`
         SELECT 
