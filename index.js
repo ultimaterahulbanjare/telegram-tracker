@@ -517,9 +517,10 @@ async function sendMetaLeadEvent(user, joinRequest) {
 
   // Joins table me log karein
   db.prepare(
-    `
+  `
     INSERT INTO joins 
       (
+        id,
         telegram_user_id,
         telegram_username,
         channel_id,
@@ -539,28 +540,30 @@ async function sendMetaLeadEvent(user, joinRequest) {
         utm_content,
         utm_term
       )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
-  ).run(
-    String(user.id),
-    user.username || null,
-    String(joinRequest.chat.id),
-    joinRequest.chat.title || null,
-    eventTime,
-    eventId,
-    ipForThisLead || null,
-    countryForThisLead || null,
-    uaForThisLead || null,
-    deviceTypeForThisLead || null,
-    browserForThisLead || null,
-    osForThisLead || null,
-    sourceForThisLead || null,
-    utmSourceForThisLead || null,
-    utmMediumForThisLead || null,
-    utmCampaignForThisLead || null,
-    utmContentForThisLead || null,
-    utmTermForThisLead || null
-  );
+).run(
+  null, // id -> NULL, SQLite auto-increment karega
+  String(user.id),
+  user.username || null,
+  String(joinRequest.chat.id),
+  joinRequest.chat.title || null,
+  eventTime,
+  eventId,
+  ipForThisLead || null,
+  countryForThisLead || null,
+  uaForThisLead || null,
+  deviceTypeForThisLead || null,
+  browserForThisLead || null,
+  osForThisLead || null,
+  sourceForThisLead || null,
+  utmSourceForThisLead || null,
+  utmMediumForThisLead || null,
+  utmCampaignForThisLead || null,
+  utmContentForThisLead || null,
+  utmTermForThisLead || null
+);
+
 
   console.log('✅ Join stored in DB for user:', user.id);
 }
