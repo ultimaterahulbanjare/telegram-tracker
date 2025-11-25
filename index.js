@@ -210,15 +210,6 @@ app.get('/debug-channels', (req, res) => {
 });
 
 // ----- LP se pre-lead capture (fbc/fbp + tracking store) -----
-// Landing page se call hoga:
-// POST /pre-lead
-// body: {
-//   channel_id: '<telegram_chat_id as string>',
-//   fbc: 'fb.1.xxx',
-//   fbp: 'fb.1.xxx',
-//   source: 'Meta' | 'Instagram' | 'Facebook' | 'Other',
-//   utm_source, utm_medium, utm_campaign, utm_content, utm_term
-// }
 app.post('/pre-lead', (req, res) => {
   try {
     const {
@@ -273,9 +264,6 @@ app.post('/pre-lead', (req, res) => {
 });
 
 // ----- Telegram webhook -----
-// 👉 Ab isko error-safe bana diya:
-// - Telegram approve fail hua → sirf log, webhook 200
-// - Meta CAPI fail hua → sirf log, webhook 200
 app.post('/telegram-webhook', async (req, res) => {
   const update = req.body;
   console.log('Incoming update:', JSON.stringify(update, null, 2));
@@ -515,12 +503,11 @@ async function sendMetaLeadEvent(user, joinRequest) {
   const res = await axios.post(url, payload);
   console.log('Meta CAPI response:', res.data);
 
-  // Joins table me log karein
+  // ✅ Joins table me log karein – **ID ko insert nahi kar rahe**, SQLite khud handle karega
   db.prepare(
-  `
+    `
     INSERT INTO joins 
       (
-        id,
         telegram_user_id,
         telegram_username,
         channel_id,
@@ -540,30 +527,28 @@ async function sendMetaLeadEvent(user, joinRequest) {
         utm_content,
         utm_term
       )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
-).run(
-  null, // id -> NULL, SQLite auto-increment karega
-  String(user.id),
-  user.username || null,
-  String(joinRequest.chat.id),
-  joinRequest.chat.title || null,
-  eventTime,
-  eventId,
-  ipForThisLead || null,
-  countryForThisLead || null,
-  uaForThisLead || null,
-  deviceTypeForThisLead || null,
-  browserForThisLead || null,
-  osForThisLead || null,
-  sourceForThisLead || null,
-  utmSourceForThisLead || null,
-  utmMediumForThisLead || null,
-  utmCampaignForThisLead || null,
-  utmContentForThisLead || null,
-  utmTermForThisLead || null
-);
-
+  ).run(
+    String(user.id),
+    user.username || null,
+    String(joinRequest.chat.id),
+    joinRequest.chat.title || null,
+    eventTime,
+    eventId,
+    ipForThisLead || null,
+    countryForThisLead || null,
+    uaForThisLead || null,
+    deviceTypeForThisLead || null,
+    browserForThisLead || null,
+    osForThisLead || null,
+    sourceForThisLead || null,
+    utmSourceForThisLead || null,
+    utmMediumForThisLead || null,
+    utmCampaignForThisLead || null,
+    utmContentForThisLead || null,
+    utmTermForThisLead || null
+  );
 
   console.log('✅ Join stored in DB for user:', user.id);
 }
