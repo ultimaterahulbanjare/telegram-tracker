@@ -8,8 +8,7 @@ const db = require('./db'); // SQLite (better-sqlite3) DB connection
 
 const app = express();
 app.use(express.json());
-const app = express();
-app.use(express.json());
+
 
 // 🔹 CORS allow for LP → backend calls
 app.use((req, res, next) => {
