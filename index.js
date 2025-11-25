@@ -8,6 +8,22 @@ const db = require('./db'); // SQLite (better-sqlite3) DB connection
 
 const app = express();
 app.use(express.json());
+const app = express();
+app.use(express.json());
+
+// 🔹 CORS allow for LP → backend calls
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*"); // chahe to yaha Netlify domain daal sakte ho
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
+
 
 // ----- Pre-lead (fbc) DB statements -----
 // LP se aane wale JOIN click ko store karne ke liye
