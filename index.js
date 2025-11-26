@@ -271,11 +271,17 @@ app.post('/telegram-webhook', async (req, res) => {
         await approveJoinRequest(chat.id, user.id);
         console.log('✅ Approved join request for user:', user.id);
       } catch (e) {
-        console.error(
-          '❌ Telegram approveChatJoinRequest error:',
-          e.response?.data || e.message || e
-        );
-      }
+  console.error('❌ Telegram approveChatJoinRequest error RAW:');
+  console.error('MESSAGE:', e.message);
+  console.error('IS_AXIOS_ERROR:', e.isAxiosError);
+  if (e.response) {
+    console.error('STATUS:', e.response.status);
+    console.error('DATA:', JSON.stringify(e.response.data, null, 2));
+  } else {
+    console.error('NO RESPONSE OBJECT, FULL ERROR:', e);
+  }
+}
+
 
       // 2) Fire Meta CAPI in background (not blocking webhook)
       try {
