@@ -143,7 +143,7 @@ const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'secret123';
 
 // Default Pixel & LP (fallback)
-const DEFAULT_META_PIXEL_ID = '1340877837162888';
+const DEFAULT_META_PIXEL_ID = '1400420661602189';
 const DEFAULT_PUBLIC_LP_URL = 'https://tourmaline-flan-4abc0c.netlify.app/';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
